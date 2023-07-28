@@ -1,0 +1,248 @@
+             +-------------------------+
+             | CSCC69                  |
+             | PROJECT 4: FILE SYSTEMS |
+             | DESIGN DOCUMENT         |
+             +-------------------------+
+
+---- GROUP ----
+
+>> Fill in the names and email addresses of your group members.
+
+Haowen Rui <anson.rui@mail.utoronto.ca>
+Andreas Alexander <andreas.alexander@mail.utoronto.ca>
+Yuanqian Fang <yuanqian.fang@mail.utoronto.ca>
+
+---- PRELIMINARIES ----
+
+>> If you have any preliminary comments on your submission, notes for the
+>> TAs, or extra credit, please give them here.
+
+>> Please cite any offline or online sources you consulted while
+>> preparing your submission, other than the Pintos documentation, course
+>> text, lecture notes, and course staff.
+
+             INDEXED AND EXTENSIBLE FILES
+             ============================
+
+---- DATA STRUCTURES ----
+
+>> A1: Copy here the declaration of each new or changed `struct' or
+>> `struct' member, global or static variable, `typedef', or
+>> enumeration.  Identify the purpose of each in 25 words or less.
+
+We added data indexing structure in inode.c:
+/* Multilevel indexing for inodes*/
+struct data_index
+{
+  uint16_t off_level;                 /* Current level of offset */
+  uint32_t offset;                 /* Offset addr for the data*/
+  uint32_t index_1[4];    /* To store data indexing */
+  uint32_t index_2[4];  /* To store data indexing */
+
+};
+
+Added 2 new variables for inode_disk to keep information of multilevel
+data in inode.c:
+/* On-disk inode.
+   Must be exactly BLOCK_SECTOR_SIZE bytes long. */
+struct inode_disk
+  {
+    uint32_t dat[15];                /* Data blocks for multilevel data */
+    uint32_t unused[110];               /* Not used. */
+  };
+Added a lock in struct inode for synchronization in inode.c:
+    struct lock lock;     /* For synchronization */
+
+We added cache struct in cache.h:
+
+/* Cache for extending files */
+struct cache 
+{
+    uint8_t block[BLOCK_SECTOR_SIZE];
+    block_sector_t disk_sector;
+
+    bool free;  /* True if space is unused */
+    bool dirty; /* True if cache is being accessed */
+    struct condition avail;  /* Whether it is in use and by which processes */
+    struct list_elem elem;   /* For reference as element for this cache */
+};
+
+>> A2: What is the maximum size of a file supported by your inode
+>> structure?  Show your work.
+
+Direct blocks: 10 * BLOCK_SECTOR_SIZE = 10 * 512 = 5,120 bytes
+Indirect blocks: BLOCK_SECTOR_SIZE / sizeof (block_sector_t) * 
+       BLOCK_SECTOR_SIZE = 512 / 4 * 512 = 131,072 bytes
+Doubly indirect blocks: BLOCK_SECTOR_SIZE / sizeof (block_sector_t) * 
+       BLOCK_SECTOR_SIZE / sizeof (block_sector_t) * BLOCK_SECTOR_SIZE 
+       = 512 / 4 * 512 / 4 * 512 = 33,554,432 bytes
+Triply indirect blocks: BLOCK_SECTOR_SIZE / sizeof (block_sector_t) * 
+       BLOCK_SECTOR_SIZE / sizeof (block_sector_t) * BLOCK_SECTOR_SIZE 
+       / sizeof (block_sector_t) * BLOCK_SECTOR_SIZE = 512 / 4 * 
+       512 / 4 * 512 / 4 * 512 = 8,589,934,592 bytes
+Approximately 8 GB
+
+---- SYNCHRONIZATION ----
+
+>> A3: Explain how your code avoids a race if two processes attempt to
+>> extend a file at the same time.
+
+The file system will have a lock so that only one process can access
+the file at any given time. When some process tries to extend 
+a file, the lock of the inode of that particular file needs to get 
+acquired, and if it is already acquired by another process, the current
+one will wait for the lock to get released before extending the file.
+
+We choose to make the inode struct to have a lock for this reason as 
+well. A process will acquire the lock to this inode when extending a file
+and also check if there is enough space for the file for this extension.
+After extension, the lock will be released by the lock, and any other
+processes that may be waiting on this lock will proceed. 
+
+>> A4: Suppose processes A and B both have file F open, both
+>> positioned at end-of-file.  If A reads and B writes F at the same
+>> time, A may read all, part, or none of what B writes.  However, A
+>> may not read data other than what B writes, e.g. if B writes
+>> nonzero data, A is not allowed to see all zeros.  Explain how your
+>> code avoids this race.
+
+We avoid this condition by utilizing the read-ahead method so that in 
+this case, A may partially read data from B. When A opens the file to
+read it, we load the inode into memory and a buffer space gets allocated
+for the read-ahead. When A reads, it will see the read-ahead space first
+and if its empty or we need more data, the filesystem will read from 
+disk and store it in the read-ahead space.
+
+When B opens the file to write to it, we create a block to hold the data,
+and returns the file inode. We treat it like a new file, with inode length
+of zero, and when B writes to it, the data gets written to the newly
+created block.
+
+Creating a new block for a write process will avoid the condition where 
+A reads part of what B is writing, so when A tries to read when B tries
+to write, we ensure A will see either the old file contents or the new 
+contents that B just wrote. 
+
+>> A5: Explain how your synchronization design provides "fairness".
+>> File access is "fair" if readers cannot indefinitely block writers
+>> or vice versa.  That is, many processes reading from a file cannot
+>> prevent forever another process from writing the file, and many
+>> processes writing to a file cannot prevent another process forever
+>> from reading the file.
+
+Our design to ensure fairness is by using a lock that needs to get 
+acquired for any read or write access. The lock will allow multiple 
+readers to access some file but only one writer can modify the file. 
+When a process acquires the lock to write, no new readers can access 
+the file, but any process that are already in the process of reading it
+will complete their reads. When a process acquires the lock to read, 
+it will not allow any new writes, but allow writes that are currently
+ongoing to continue. 
+
+For fairness, when a process that tries to write acquires the lock, it
+will block any read processes to acquire the lock, so any reads will have
+to wait until the write is finished, so that the write process is not
+indefinitely blocked. A similar situation happens when a process tries
+to read a file and acquires the lock, it lets ongoing writes to finish
+before acquiring the lock, but will read it before new write processes
+acquires the lock, so that it will not get blocked indefinitely by writes.
+
+---- RATIONALE ----
+
+>> A6: Is your inode structure a multilevel index?  If so, why did you
+>> choose this particular combination of direct, indirect, and doubly
+>> indirect blocks?  If not, why did you choose an alternative inode
+>> structure, and what advantages and disadvantages does your
+>> structure have, compared to a multilevel index?
+
+Multilevel index allows for more efficient disk space usage, with 
+direct blocks ready for smaller file sizes but also allows larger files 
+with the indirect and doubly indirect blocks. It also gives us better
+speed when accessing data, since direct blocks will have fast access and
+for indirect ones, we can do caching to also make faster accesses. 
+                SUBDIRECTORIES
+                ==============
+
+---- DATA STRUCTURES ----
+
+>> B1: Copy here the declaration of each new or changed `struct' or
+>> `struct' member, global or static variable, `typedef', or
+>> enumeration.  Identify the purpose of each in 25 words or less.
+
+---- ALGORITHMS ----
+
+>> B2: Describe your code for traversing a user-specified path.  How
+>> do traversals of absolute and relative paths differ?
+
+---- SYNCHRONIZATION ----
+
+>> B4: How do you prevent races on directory entries?  For example,
+>> only one of two simultaneous attempts to remove a single file
+>> should succeed, as should only one of two simultaneous attempts to
+>> create a file with the same name, and so on.
+
+>> B5: Does your implementation allow a directory to be removed if it
+>> is open by a process or if it is in use as a process's current
+>> working directory?  If so, what happens to that process's future
+>> file system operations?  If not, how do you prevent it?
+
+---- RATIONALE ----
+
+>> B6: Explain why you chose to represent the current directory of a
+>> process the way you did.
+
+                 BUFFER CACHE
+                 ============
+
+---- DATA STRUCTURES ----
+
+>> C1: Copy here the declaration of each new or changed `struct' or
+>> `struct' member, global or static variable, `typedef', or
+>> enumeration.  Identify the purpose of each in 25 words or less.
+
+---- ALGORITHMS ----
+
+>> C2: Describe how your cache replacement algorithm chooses a cache
+>> block to evict.
+
+>> C3: Describe your implementation of write-behind.
+
+>> C4: Describe your implementation of read-ahead.
+
+---- SYNCHRONIZATION ----
+
+>> C5: When one process is actively reading or writing data in a
+>> buffer cache block, how are other processes prevented from evicting
+>> that block?
+
+>> C6: During the eviction of a block from the cache, how are other
+>> processes prevented from attempting to access the block?
+
+---- RATIONALE ----
+
+>> C7: Describe a file workload likely to benefit from buffer caching,
+>> and workloads likely to benefit from read-ahead and write-behind.
+
+               SURVEY QUESTIONS
+               ================
+
+Answering these questions is optional, but it will help us improve the
+course in future quarters.  Feel free to tell us anything you
+want--these questions are just to spur your thoughts.  You may also
+choose to respond anonymously in the course evaluations at the end of
+the quarter.
+
+>> In your opinion, was this assignment, or any one of the three problems
+>> in it, too easy or too hard?  Did it take too long or too little time?
+
+>> Did you find that working on a particular part of the assignment gave
+>> you greater insight into some aspect of OS design?
+
+>> Is there some particular fact or hint we should give students in
+>> future quarters to help them solve the problems?  Conversely, did you
+>> find any of our guidance to be misleading?
+
+>> Do you have any suggestions for the TAs to more effectively assist
+>> students in future quarters?
+
+>> Any other comments?
